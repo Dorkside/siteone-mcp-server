@@ -1,3 +1,12 @@
 node_modules/
 dist/
 *.tgz
+
+# SiteOne Crawler binaries and archives
+crawler
+siteone-crawler-*
+*.tar.gz
+
+# Crawl output artifacts
+sitemap.xml
+siteone-markdown-export/
