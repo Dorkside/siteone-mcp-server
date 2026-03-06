@@ -42,6 +42,7 @@ No test suite or linter is configured yet.
 - **No console.log** — This is a stdio MCP server; stdout is the JSON-RPC transport. Use `console.error()` for diagnostics only.
 - **Safe process execution** — Always use `execFile` with args array (never `exec` with string interpolation) to prevent command injection
 - **MCP error responses** — Return `{ isError: true, content: [...] }` for errors so clients can distinguish failures from normal output
-- **Output truncation** — 50MB buffer for crawl results; `truncateResult()` caps output at 500KB before returning to the MCP client
-- **Dynamic timeouts** — Crawl timeout scales with `max_depth` parameter: `Math.max(300_000, max_depth * 60_000)`
+- **Output truncation** — 50MB buffer for crawl results; `truncateResult()` caps output at 100KB before returning to the MCP client
+- **Output transformation** — `transformSiteoneOutput()` strips column metadata and internal fields for audit tools; `summarizeSiteoneOutput()` keeps only actionable data for health-check and file-output tools
+- **Dynamic timeouts** — Crawl timeout scales with `max_depth` parameter across all crawl tools: `Math.max(300_000, max_depth * 60_000)`
 - **Default divergences from SiteOne CLI** — `max_depth` defaults to 10 (SiteOne default is unlimited), `rows_limit` defaults to 500 (SiteOne default is 200). These are intentionally safer for MCP use.

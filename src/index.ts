@@ -576,7 +576,7 @@ server.tool(
 // --- Tool: generate_sitemap ---
 server.tool(
   "generate_sitemap",
-  "Crawl a website and generate an XML sitemap file. Returns the path to the generated sitemap.",
+  "Crawl a website and generate an XML sitemap file. Returns the sitemap file path and a crawl summary. Use for SEO audits or submitting sitemaps to search engines.",
   {
     url: z.string().url().describe("Target URL to crawl"),
     output_file: z
@@ -602,14 +602,14 @@ server.tool(
       "--output=json",
     ];
 
-    const result = await runSiteone(args, 300_000);
+    const result = await runSiteone(args, Math.max(300_000, params.max_depth * 60_000));
     let text: string;
     if (result.isError) {
       text = result.output;
     } else {
       let parsed: any;
       try {
-        parsed = JSON.parse(transformSiteoneOutput(result.output));
+        parsed = JSON.parse(summarizeSiteoneOutput(result.output));
       } catch {
         parsed = {};
       }
@@ -629,7 +629,7 @@ server.tool(
 // --- Tool: export_markdown ---
 server.tool(
   "export_markdown",
-  "Crawl a website and export all pages as markdown files. Useful for content analysis, migration, or feeding into other AI tools.",
+  "Crawl a website and export each page as a markdown file. Returns the export directory path and a crawl summary. Use for content migration, offline analysis, or feeding pages into other tools.",
   {
     url: z.string().url().describe("Target URL to crawl"),
     output_dir: z
@@ -640,7 +640,7 @@ server.tool(
       .number()
       .int()
       .min(1)
-      .max(50)
+      .max(100)
       .default(5)
       .describe(
         "Maximum crawl depth (SiteOne default is unlimited; 5 is safer for MCP use)"
@@ -655,14 +655,14 @@ server.tool(
       "--output=json",
     ];
 
-    const result = await runSiteone(args, 300_000);
+    const result = await runSiteone(args, Math.max(300_000, params.max_depth * 60_000));
     let text: string;
     if (result.isError) {
       text = result.output;
     } else {
       let parsed: any;
       try {
-        parsed = JSON.parse(transformSiteoneOutput(result.output));
+        parsed = JSON.parse(summarizeSiteoneOutput(result.output));
       } catch {
         parsed = {};
       }
@@ -682,7 +682,7 @@ server.tool(
 // --- Tool: get_crawl_summary ---
 server.tool(
   "get_crawl_summary",
-  "Run a quick shallow crawl and return summary statistics — status codes, response times, error counts. Good for fast health checks.",
+  "Run a quick, shallow crawl and return only high-level statistics: status code distribution, response times, and error counts. Best for fast site health checks before running a full crawl.",
   {
     url: z.string().url().describe("Target URL to crawl"),
     max_depth: z
