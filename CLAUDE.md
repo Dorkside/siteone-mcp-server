@@ -8,7 +8,7 @@ MCP (Model Context Protocol) server written in TypeScript that wraps the SiteOne
 
 ## Build & Development Commands
 
-- `npm run build` — Compile TypeScript to `dist/` via `tsc`
+- `npm run build` — Bundle with `tsup` to `dist/` (config in `tsup.config.ts`, handles shebang automatically)
 - `npm run dev` — Watch mode for development
 - `npm run inspect` — Test with MCP Inspector (opens browser UI for interactive tool testing)
 - `npm pack --dry-run` — Preview what will be published to npm
@@ -38,11 +38,10 @@ No test suite or linter is configured yet.
 ## Key Conventions
 
 - **ES modules** — `"type": "module"` in package.json, Node16 module resolution
-- **Shebang required** — `dist/index.js` must have `#!/usr/bin/env node` for `npx` execution. TypeScript may strip it during compilation; verify with `head -1 dist/index.js` after build
+- **Shebang required** — `dist/index.js` must have `#!/usr/bin/env node` for `npx` execution. `tsup.config.ts` handles this via the `banner` option; verify with `head -1 dist/index.js` after build
+- **No console.log** — This is a stdio MCP server; stdout is the JSON-RPC transport. Use `console.error()` for diagnostics only.
 - **Safe process execution** — Always use `execFile` with args array (never `exec` with string interpolation) to prevent command injection
-- **Large output handling** — 50MB buffer for crawl results; outputs are truncated (`.slice(0, 2000)`) before returning to prevent overwhelming MCP responses
+- **MCP error responses** — Return `{ isError: true, content: [...] }` for errors so clients can distinguish failures from normal output
+- **Output truncation** — 50MB buffer for crawl results; `truncateResult()` caps output at 500KB before returning to the MCP client
 - **Dynamic timeouts** — Crawl timeout scales with `max_depth` parameter: `Math.max(300_000, max_depth * 60_000)`
-
-## Implementation Reference
-
-`plan.md` contains the complete implementation plan including full source code, package.json, tsconfig.json, publishing checklist, and testing strategy.
+- **Default divergences from SiteOne CLI** — `max_depth` defaults to 10 (SiteOne default is unlimited), `rows_limit` defaults to 500 (SiteOne default is 200). These are intentionally safer for MCP use.

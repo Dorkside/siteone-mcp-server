@@ -1,0 +1,43 @@
+{
+  "name": "siteone-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server wrapping SiteOne Crawler CLI for SEO auditing and site analysis",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "siteone-mcp-server": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "siteone",
+    "crawler",
+    "seo",
+    "model-context-protocol",
+    "claude"
+  ],
+  "author": "James Martin <contact@james-martin.dev>",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
