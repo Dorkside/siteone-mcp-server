@@ -2,9 +2,17 @@
 
 MCP server that wraps the [SiteOne Crawler](https://crawler.siteone.io) CLI for SEO auditing and site analysis. Use it with Claude Code, Claude Desktop, or any MCP-compatible client.
 
-## Prerequisites
+## Install SiteOne Crawler
 
-[SiteOne Crawler](https://crawler.siteone.io) must be installed on your machine. Download the latest release from [GitHub](https://github.com/janreges/siteone-crawler/releases) and ensure the `crawler` binary is in your PATH.
+The auto-installer downloads the correct SiteOne Crawler binary for your platform:
+
+```bash
+npx -y siteone-mcp-server --install
+```
+
+This installs to `~/.siteone-crawler/` and the MCP server will auto-detect it — no further configuration needed.
+
+Supports macOS (arm64, x64) and Linux (arm64, x64). Windows users should [download manually](https://github.com/janreges/siteone-crawler/releases).
 
 ## Quick Start
 
@@ -12,12 +20,6 @@ MCP server that wraps the [SiteOne Crawler](https://crawler.siteone.io) CLI for 
 
 ```bash
 claude mcp add siteone -- npx -y siteone-mcp-server
-```
-
-Or if you need to specify the binary path:
-
-```bash
-claude mcp add siteone -e SITEONE_BIN=/path/to/crawler -- npx -y siteone-mcp-server
 ```
 
 ### Claude Desktop
@@ -47,9 +49,37 @@ Add to your MCP settings (`~/.claude/mcp_settings.json`):
 
 ## Configuration
 
-| Environment Variable | Purpose | Default |
-|---------------------|---------|---------|
-| `SITEONE_BIN` | Path to the SiteOne crawler binary | `crawler` (assumes in PATH) |
+The server resolves the SiteOne binary in this order:
+
+1. `--siteone-bin` CLI argument (highest priority)
+2. `SITEONE_BIN` environment variable
+3. `~/.siteone-crawler/crawler` (auto-installed location)
+4. `crawler` in PATH (fallback)
+
+### CLI argument
+
+```bash
+claude mcp add siteone -- npx -y siteone-mcp-server --siteone-bin=/path/to/crawler
+```
+
+Or in Claude Desktop config:
+
+```json
+{
+  "mcpServers": {
+    "siteone": {
+      "command": "npx",
+      "args": ["-y", "siteone-mcp-server", "--siteone-bin=/path/to/crawler"]
+    }
+  }
+}
+```
+
+### Environment variables
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `SITEONE_BIN` | Path to the SiteOne crawler binary | Auto-detected (see above) |
 | `SITEONE_OUTPUT_DIR` | Working directory for crawl outputs | Current working directory |
 
 ## Examples

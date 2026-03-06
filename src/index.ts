@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 // IMPORTANT: Never use console.log() in this file.
 // This is a stdio MCP server — stdout is the JSON-RPC transport.
 // Use console.error() for debug/diagnostic output only.
@@ -7,11 +5,23 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { readFileSync } from "node:fs";
+import {
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  renameSync,
+  readdirSync,
+  unlinkSync,
+  chmodSync,
+} from "node:fs";
+import { createWriteStream } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import https from "node:https";
+import http from "node:http";
 
 const execFileAsync = promisify(execFile);
 
@@ -21,8 +31,171 @@ const pkg = JSON.parse(
   readFileSync(join(__dirname, "..", "package.json"), "utf-8")
 );
 
-// --- Configuration via env vars ---
-const SITEONE_BIN = process.env.SITEONE_BIN || "crawler";
+// --- SiteOne Crawler auto-install ---
+const SITEONE_VERSION = "1.0.9";
+const INSTALL_DIR = join(homedir(), ".siteone-crawler");
+
+function resolveSiteoneBin(): string {
+  // 1. --siteone-bin CLI arg (parsed in main, stored here)
+  const cliArg = process.argv
+    .slice(2)
+    .find((a) => a.startsWith("--siteone-bin="));
+  if (cliArg) return cliArg.split("=").slice(1).join("=");
+
+  // 2. SITEONE_BIN env var
+  if (process.env.SITEONE_BIN) return process.env.SITEONE_BIN;
+
+  // 3. ~/.siteone-crawler/crawler (auto-installed location)
+  const autoInstalled = join(INSTALL_DIR, "crawler");
+  if (existsSync(autoInstalled)) return autoInstalled;
+
+  // 4. Fall back to PATH lookup
+  return "crawler";
+}
+
+function getPlatformAsset(): { filename: string; archiveType: "tar.gz" } {
+  const platform = process.platform;
+  const arch = process.arch;
+
+  if (platform === "win32") {
+    console.error(
+      "Windows is not yet supported by the auto-installer.\n" +
+        "Please download SiteOne Crawler manually from https://crawler.siteone.io\n" +
+        "and set --siteone-bin=/path/to/crawler or SITEONE_BIN env var."
+    );
+    process.exit(1);
+  }
+
+  let platformStr: string;
+  let archStr: string;
+
+  if (platform === "darwin") {
+    platformStr = "macos";
+  } else if (platform === "linux") {
+    platformStr = "linux";
+  } else {
+    console.error(`Unsupported platform: ${platform}`);
+    process.exit(1);
+  }
+
+  if (arch === "arm64") {
+    archStr = "arm64";
+  } else if (arch === "x64") {
+    archStr = "x64";
+  } else {
+    console.error(`Unsupported architecture: ${arch}`);
+    process.exit(1);
+  }
+
+  const filename = `siteone-crawler-v${SITEONE_VERSION}-${platformStr}-${archStr}.tar.gz`;
+  return { filename, archiveType: "tar.gz" };
+}
+
+function downloadFile(url: string, dest: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const file = createWriteStream(dest);
+    const request = (url.startsWith("https") ? https : http).get(
+      url,
+      (response) => {
+        // Follow redirects (GitHub releases redirect to S3)
+        if (
+          response.statusCode &&
+          response.statusCode >= 300 &&
+          response.statusCode < 400 &&
+          response.headers.location
+        ) {
+          file.close();
+          unlinkSync(dest);
+          downloadFile(response.headers.location, dest).then(resolve, reject);
+          return;
+        }
+
+        if (response.statusCode && response.statusCode !== 200) {
+          file.close();
+          unlinkSync(dest);
+          reject(
+            new Error(`Download failed with status ${response.statusCode}`)
+          );
+          return;
+        }
+
+        response.pipe(file);
+        file.on("finish", () => {
+          file.close();
+          resolve();
+        });
+      }
+    );
+    request.on("error", (err) => {
+      file.close();
+      unlinkSync(dest);
+      reject(err);
+    });
+  });
+}
+
+async function installSiteone(): Promise<void> {
+  const { filename } = getPlatformAsset();
+  const downloadUrl = `https://github.com/janreges/siteone-crawler/releases/download/v${SITEONE_VERSION}/${filename}`;
+
+  console.error(`Installing SiteOne Crawler v${SITEONE_VERSION}...`);
+  console.error(`Platform: ${process.platform}/${process.arch}`);
+  console.error(`Download: ${downloadUrl}`);
+
+  // Create install directory
+  mkdirSync(INSTALL_DIR, { recursive: true });
+
+  const archivePath = join(INSTALL_DIR, filename);
+
+  // Download
+  console.error("Downloading...");
+  await downloadFile(downloadUrl, archivePath);
+  console.error("Download complete.");
+
+  // Extract
+  console.error("Extracting...");
+  execFileSync("tar", ["xzf", archivePath, "-C", INSTALL_DIR]);
+
+  // The archive extracts to a subdirectory like siteone-crawler-v1.0.9-macos-arm64/
+  // Move its contents to INSTALL_DIR directly
+  const extractedDirName = filename.replace(".tar.gz", "");
+  const extractedDir = join(INSTALL_DIR, extractedDirName);
+
+  if (existsSync(extractedDir)) {
+    const entries = readdirSync(extractedDir);
+    for (const entry of entries) {
+      const src = join(extractedDir, entry);
+      const dest = join(INSTALL_DIR, entry);
+      // Remove existing entry if present (for upgrades)
+      if (existsSync(dest)) {
+        execFileSync("rm", ["-rf", dest]);
+      }
+      renameSync(src, dest);
+    }
+    // Remove the now-empty extracted directory
+    execFileSync("rm", ["-rf", extractedDir]);
+  }
+
+  // Clean up the archive
+  unlinkSync(archivePath);
+
+  // Ensure the crawler script is executable
+  const crawlerPath = join(INSTALL_DIR, "crawler");
+  if (existsSync(crawlerPath)) {
+    chmodSync(crawlerPath, 0o755);
+  }
+
+  console.error(`\nSiteOne Crawler installed to ${INSTALL_DIR}`);
+  console.error(
+    `Binary: ${crawlerPath}\n`
+  );
+  console.error(
+    "The MCP server will auto-detect this installation — no configuration needed."
+  );
+}
+
+// --- Configuration ---
+const SITEONE_BIN = resolveSiteoneBin();
 const SITEONE_OUTPUT_DIR = process.env.SITEONE_OUTPUT_DIR || process.cwd();
 
 // --- Output truncation ---
@@ -320,6 +493,13 @@ server.tool(
 
 // --- Start server ---
 async function main() {
+  const args = process.argv.slice(2);
+
+  if (args.includes("--install")) {
+    await installSiteone();
+    process.exit(0);
+  }
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
