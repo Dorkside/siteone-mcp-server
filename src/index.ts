@@ -214,22 +214,79 @@ function truncateResult(result: string): string {
 // formatter, renderer, etc.) that bloats output ~2x with no value to an LLM.
 // These functions strip that noise and return only actionable data.
 
-// Internal SiteOne fields on table rows that have no meaning outside the CLI renderer
-const INTERNAL_ROW_FIELDS = new Set(["urlUqId", "highestSeverity"]);
+// Tables to drop entirely (internal SiteOne profiling, or redundant)
+const SKIP_TABLES = new Set([
+  "analysis-stats", // internal profiler timings
+  "content-processors-stats", // internal profiler timings
+  "content-types-raw", // redundant with content-types (uses MIME strings vs friendly names)
+]);
 
-function cleanRow(row: Record<string, any>): Record<string, any> {
+// Internal SiteOne fields on table rows — no meaning outside the CLI renderer
+const INTERNAL_ROW_FIELDS = new Set([
+  "urlUqId",
+  "uqId",
+  "highestSeverity",
+  "sourceAttr",
+  "cacheTypeFlags",
+  "isExternal",
+  "isAllowedForCrawling",
+  "uniqueValuesLimitReached",
+  "contentTypeId",
+]);
+
+function cleanRow(row: Record<string, any>): Record<string, any> | null {
   const cleaned: Record<string, any> = {};
   for (const [key, value] of Object.entries(row)) {
     if (INTERNAL_ROW_FIELDS.has(key)) continue;
     if (value === null || value === "") continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+
+    // Strip numeric contentType when the string contentTypeHeader exists
+    if (
+      key === "contentType" &&
+      typeof value === "number" &&
+      "contentTypeHeader" in row
+    )
+      continue;
+
+    // Flatten recommendation objects: {"msg": "msg"} → "msg"
+    if (
+      key === "recommendation" &&
+      typeof value === "object" &&
+      !Array.isArray(value)
+    ) {
+      const keys = Object.keys(value);
+      if (keys.length > 0) {
+        cleaned[key] = keys.join("; ");
+      }
+      continue;
+    }
+
     cleaned[key] = value;
   }
-  return cleaned;
+  return Object.keys(cleaned).length > 0 ? cleaned : null;
+}
+
+function cleanTableRows(
+  key: string,
+  rows: any[]
+): (Record<string, any> | null)[] {
+  // certificate-info: strip massive raw certificate/protocol dumps
+  if (key === "certificate-info") {
+    return rows
+      .filter((r: any) => {
+        const info = String(r.info || "");
+        return !info.startsWith("RAW ");
+      })
+      .map(cleanRow);
+  }
+  return rows.map(cleanRow);
 }
 
 /**
  * Transform raw SiteOne JSON into a lean, LLM-friendly format.
- * Strips: column metadata, empty tables, options echo, crawler info, internal row fields.
+ * Strips: column metadata, empty/internal tables, options echo, crawler info,
+ * internal row fields, raw certificate dumps, redundant numeric enums.
  * Keeps: stats, per-URL results, table rows with titles.
  */
 function transformSiteoneOutput(rawJson: string): string {
@@ -265,9 +322,16 @@ function transformSiteoneOutput(rawJson: string): string {
       string,
       any,
     ][]) {
+      if (SKIP_TABLES.has(key)) continue;
       const rows = table.rows;
       if (!rows?.length) continue;
-      tables[table.title || key] = rows.map(cleanRow);
+      const cleaned = cleanTableRows(key, rows).filter(Boolean) as Record<
+        string,
+        any
+      >[];
+      if (cleaned.length) {
+        tables[table.title || key] = cleaned;
+      }
     }
     if (Object.keys(tables).length) {
       output.tables = tables;
@@ -328,7 +392,13 @@ function summarizeSiteoneOutput(rawJson: string): string {
       if (!SUMMARY_TABLES.has(key)) continue;
       const rows = table.rows;
       if (!rows?.length) continue;
-      tables[table.title || key] = rows.map(cleanRow);
+      const cleaned = cleanTableRows(key, rows).filter(Boolean) as Record<
+        string,
+        any
+      >[];
+      if (cleaned.length) {
+        tables[table.title || key] = cleaned;
+      }
     }
     if (Object.keys(tables).length) {
       output.tables = tables;
