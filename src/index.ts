@@ -214,22 +214,79 @@ function truncateResult(result: string): string {
 // formatter, renderer, etc.) that bloats output ~2x with no value to an LLM.
 // These functions strip that noise and return only actionable data.
 
-// Internal SiteOne fields on table rows that have no meaning outside the CLI renderer
-const INTERNAL_ROW_FIELDS = new Set(["urlUqId", "highestSeverity"]);
+// Tables to drop entirely (internal SiteOne profiling, or redundant)
+const SKIP_TABLES = new Set([
+  "analysis-stats", // internal profiler timings
+  "content-processors-stats", // internal profiler timings
+  "content-types-raw", // redundant with content-types (uses MIME strings vs friendly names)
+]);
 
-function cleanRow(row: Record<string, any>): Record<string, any> {
+// Internal SiteOne fields on table rows — no meaning outside the CLI renderer
+const INTERNAL_ROW_FIELDS = new Set([
+  "urlUqId",
+  "uqId",
+  "highestSeverity",
+  "sourceAttr",
+  "cacheTypeFlags",
+  "isExternal",
+  "isAllowedForCrawling",
+  "uniqueValuesLimitReached",
+  "contentTypeId",
+]);
+
+function cleanRow(row: Record<string, any>): Record<string, any> | null {
   const cleaned: Record<string, any> = {};
   for (const [key, value] of Object.entries(row)) {
     if (INTERNAL_ROW_FIELDS.has(key)) continue;
     if (value === null || value === "") continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+
+    // Strip numeric contentType when the string contentTypeHeader exists
+    if (
+      key === "contentType" &&
+      typeof value === "number" &&
+      "contentTypeHeader" in row
+    )
+      continue;
+
+    // Flatten recommendation objects: {"msg": "msg"} → "msg"
+    if (
+      key === "recommendation" &&
+      typeof value === "object" &&
+      !Array.isArray(value)
+    ) {
+      const keys = Object.keys(value);
+      if (keys.length > 0) {
+        cleaned[key] = keys.join("; ");
+      }
+      continue;
+    }
+
     cleaned[key] = value;
   }
-  return cleaned;
+  return Object.keys(cleaned).length > 0 ? cleaned : null;
+}
+
+function cleanTableRows(
+  key: string,
+  rows: any[]
+): (Record<string, any> | null)[] {
+  // certificate-info: strip massive raw certificate/protocol dumps
+  if (key === "certificate-info") {
+    return rows
+      .filter((r: any) => {
+        const info = String(r.info || "");
+        return !info.startsWith("RAW ");
+      })
+      .map(cleanRow);
+  }
+  return rows.map(cleanRow);
 }
 
 /**
  * Transform raw SiteOne JSON into a lean, LLM-friendly format.
- * Strips: column metadata, empty tables, options echo, crawler info, internal row fields.
+ * Strips: column metadata, empty/internal tables, options echo, crawler info,
+ * internal row fields, raw certificate dumps, redundant numeric enums.
  * Keeps: stats, per-URL results, table rows with titles.
  */
 function transformSiteoneOutput(rawJson: string): string {
@@ -265,9 +322,16 @@ function transformSiteoneOutput(rawJson: string): string {
       string,
       any,
     ][]) {
+      if (SKIP_TABLES.has(key)) continue;
       const rows = table.rows;
       if (!rows?.length) continue;
-      tables[table.title || key] = rows.map(cleanRow);
+      const cleaned = cleanTableRows(key, rows).filter(Boolean) as Record<
+        string,
+        any
+      >[];
+      if (cleaned.length) {
+        tables[table.title || key] = cleaned;
+      }
     }
     if (Object.keys(tables).length) {
       output.tables = tables;
@@ -328,7 +392,13 @@ function summarizeSiteoneOutput(rawJson: string): string {
       if (!SUMMARY_TABLES.has(key)) continue;
       const rows = table.rows;
       if (!rows?.length) continue;
-      tables[table.title || key] = rows.map(cleanRow);
+      const cleaned = cleanTableRows(key, rows).filter(Boolean) as Record<
+        string,
+        any
+      >[];
+      if (cleaned.length) {
+        tables[table.title || key] = cleaned;
+      }
     }
     if (Object.keys(tables).length) {
       output.tables = tables;
@@ -506,7 +576,7 @@ server.tool(
 // --- Tool: generate_sitemap ---
 server.tool(
   "generate_sitemap",
-  "Crawl a website and generate an XML sitemap file. Returns the path to the generated sitemap.",
+  "Crawl a website and generate an XML sitemap file. Returns the sitemap file path and a crawl summary. Use for SEO audits or submitting sitemaps to search engines.",
   {
     url: z.string().url().describe("Target URL to crawl"),
     output_file: z
@@ -532,14 +602,14 @@ server.tool(
       "--output=json",
     ];
 
-    const result = await runSiteone(args, 300_000);
+    const result = await runSiteone(args, Math.max(300_000, params.max_depth * 60_000));
     let text: string;
     if (result.isError) {
       text = result.output;
     } else {
       let parsed: any;
       try {
-        parsed = JSON.parse(transformSiteoneOutput(result.output));
+        parsed = JSON.parse(summarizeSiteoneOutput(result.output));
       } catch {
         parsed = {};
       }
@@ -559,7 +629,7 @@ server.tool(
 // --- Tool: export_markdown ---
 server.tool(
   "export_markdown",
-  "Crawl a website and export all pages as markdown files. Useful for content analysis, migration, or feeding into other AI tools.",
+  "Crawl a website and export each page as a markdown file. Returns the export directory path and a crawl summary. Use for content migration, offline analysis, or feeding pages into other tools.",
   {
     url: z.string().url().describe("Target URL to crawl"),
     output_dir: z
@@ -570,7 +640,7 @@ server.tool(
       .number()
       .int()
       .min(1)
-      .max(50)
+      .max(100)
       .default(5)
       .describe(
         "Maximum crawl depth (SiteOne default is unlimited; 5 is safer for MCP use)"
@@ -585,14 +655,14 @@ server.tool(
       "--output=json",
     ];
 
-    const result = await runSiteone(args, 300_000);
+    const result = await runSiteone(args, Math.max(300_000, params.max_depth * 60_000));
     let text: string;
     if (result.isError) {
       text = result.output;
     } else {
       let parsed: any;
       try {
-        parsed = JSON.parse(transformSiteoneOutput(result.output));
+        parsed = JSON.parse(summarizeSiteoneOutput(result.output));
       } catch {
         parsed = {};
       }
@@ -612,7 +682,7 @@ server.tool(
 // --- Tool: get_crawl_summary ---
 server.tool(
   "get_crawl_summary",
-  "Run a quick shallow crawl and return summary statistics — status codes, response times, error counts. Good for fast health checks.",
+  "Run a quick, shallow crawl and return only high-level statistics: status code distribution, response times, and error counts. Best for fast site health checks before running a full crawl.",
   {
     url: z.string().url().describe("Target URL to crawl"),
     max_depth: z
