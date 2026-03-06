@@ -1,6 +1,6 @@
 {
   "name": "siteone-mcp-server",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MCP server wrapping SiteOne Crawler CLI for SEO auditing and site analysis",
   "type": "module",
   "main": "dist/index.js",
