@@ -199,7 +199,7 @@ const SITEONE_BIN = resolveSiteoneBin();
 const SITEONE_OUTPUT_DIR = process.env.SITEONE_OUTPUT_DIR || process.cwd();
 
 // --- Output truncation ---
-const MAX_RESULT_LENGTH = 500_000; // 500KB
+const MAX_RESULT_LENGTH = 100_000; // 100KB — fits comfortably in LLM context
 
 function truncateResult(result: string): string {
   if (result.length <= MAX_RESULT_LENGTH) return result;
@@ -207,6 +207,135 @@ function truncateResult(result: string): string {
     result.slice(0, MAX_RESULT_LENGTH) +
     `\n\n[Output truncated: ${result.length} chars total, showing first ${MAX_RESULT_LENGTH}]`
   );
+}
+
+// --- SiteOne JSON output transformation ---
+// SiteOne's raw JSON contains verbose column metadata (rendering hints like width,
+// formatter, renderer, etc.) that bloats output ~2x with no value to an LLM.
+// These functions strip that noise and return only actionable data.
+
+// Internal SiteOne fields on table rows that have no meaning outside the CLI renderer
+const INTERNAL_ROW_FIELDS = new Set(["urlUqId", "highestSeverity"]);
+
+function cleanRow(row: Record<string, any>): Record<string, any> {
+  const cleaned: Record<string, any> = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (INTERNAL_ROW_FIELDS.has(key)) continue;
+    if (value === null || value === "") continue;
+    cleaned[key] = value;
+  }
+  return cleaned;
+}
+
+/**
+ * Transform raw SiteOne JSON into a lean, LLM-friendly format.
+ * Strips: column metadata, empty tables, options echo, crawler info, internal row fields.
+ * Keeps: stats, per-URL results, table rows with titles.
+ */
+function transformSiteoneOutput(rawJson: string): string {
+  let data: any;
+  try {
+    data = JSON.parse(rawJson);
+  } catch {
+    return rawJson; // not JSON (plain text error) — return as-is
+  }
+
+  const output: Record<string, any> = {};
+
+  if (data.stats) {
+    output.stats = data.stats;
+  }
+
+  if (data.results?.length) {
+    output.results = data.results.map((r: any) => {
+      const entry: Record<string, any> = {
+        url: r.url,
+        status: r.status,
+        elapsedTime: r.elapsedTime,
+        size: r.size,
+      };
+      if (r.extras?.length) entry.extras = r.extras;
+      return entry;
+    });
+  }
+
+  if (data.tables) {
+    const tables: Record<string, any[]> = {};
+    for (const [key, table] of Object.entries(data.tables) as [
+      string,
+      any,
+    ][]) {
+      const rows = table.rows;
+      if (!rows?.length) continue;
+      tables[table.title || key] = rows.map(cleanRow);
+    }
+    if (Object.keys(tables).length) {
+      output.tables = tables;
+    }
+  }
+
+  return JSON.stringify(output, null, 2);
+}
+
+/**
+ * Aggressive summarization for get_crawl_summary — only stats + actionable findings.
+ * Drops per-URL results (except problems) and non-actionable tables.
+ */
+const SUMMARY_TABLES = new Set([
+  "seo",
+  "security",
+  "best-practices",
+  "accessibility",
+  "redirects",
+  "404",
+]);
+
+function summarizeSiteoneOutput(rawJson: string): string {
+  let data: any;
+  try {
+    data = JSON.parse(rawJson);
+  } catch {
+    return rawJson;
+  }
+
+  const output: Record<string, any> = {};
+
+  if (data.stats) {
+    output.stats = data.stats;
+  }
+
+  // Only surface problem URLs (4xx, 5xx, or unparseable status)
+  if (data.results?.length) {
+    const problems = data.results.filter((r: any) => {
+      const status = parseInt(r.status, 10);
+      return isNaN(status) || status >= 400;
+    });
+    if (problems.length) {
+      output.problemUrls = problems.map((r: any) => ({
+        url: r.url,
+        status: r.status,
+      }));
+    }
+  }
+
+  // Only include actionable tables
+  if (data.tables) {
+    const tables: Record<string, any[]> = {};
+    for (const [key, table] of Object.entries(data.tables) as [
+      string,
+      any,
+    ][]) {
+      if (!SUMMARY_TABLES.has(key)) continue;
+      const rows = table.rows;
+      if (!rows?.length) continue;
+      tables[table.title || key] = rows.map(cleanRow);
+    }
+    if (Object.keys(tables).length) {
+      output.tables = tables;
+    }
+  }
+
+  return JSON.stringify(output, null, 2);
 }
 
 // --- Helper: run SiteOne CLI ---
@@ -329,9 +458,12 @@ server.tool(
       args,
       Math.max(300_000, params.max_depth * 60_000)
     );
+    const text = result.isError
+      ? result.output
+      : transformSiteoneOutput(result.output);
     return {
       isError: result.isError,
-      content: [{ type: "text" as const, text: truncateResult(result.output) }],
+      content: [{ type: "text" as const, text: truncateResult(text) }],
     };
   }
 );
@@ -361,9 +493,12 @@ server.tool(
     if (params.extra_columns) args.push(`--extra-columns=${params.extra_columns}`);
 
     const result = await runSiteone(args, 60_000);
+    const text = result.isError
+      ? result.output
+      : transformSiteoneOutput(result.output);
     return {
       isError: result.isError,
-      content: [{ type: "text" as const, text: truncateResult(result.output) }],
+      content: [{ type: "text" as const, text: truncateResult(text) }],
     };
   }
 );
@@ -398,15 +533,25 @@ server.tool(
     ];
 
     const result = await runSiteone(args, 300_000);
-    const response = result.isError
-      ? result.output
-      : JSON.stringify({
-          sitemap_path: outputPath,
-          crawl_output: truncateResult(result.output),
-        });
+    let text: string;
+    if (result.isError) {
+      text = result.output;
+    } else {
+      let parsed: any;
+      try {
+        parsed = JSON.parse(transformSiteoneOutput(result.output));
+      } catch {
+        parsed = {};
+      }
+      text = JSON.stringify(
+        { sitemap_path: outputPath, ...parsed },
+        null,
+        2
+      );
+    }
     return {
       isError: result.isError,
-      content: [{ type: "text" as const, text: response }],
+      content: [{ type: "text" as const, text: truncateResult(text) }],
     };
   }
 );
@@ -441,15 +586,25 @@ server.tool(
     ];
 
     const result = await runSiteone(args, 300_000);
-    const response = result.isError
-      ? result.output
-      : JSON.stringify({
-          export_path: exportPath,
-          crawl_output: truncateResult(result.output),
-        });
+    let text: string;
+    if (result.isError) {
+      text = result.output;
+    } else {
+      let parsed: any;
+      try {
+        parsed = JSON.parse(transformSiteoneOutput(result.output));
+      } catch {
+        parsed = {};
+      }
+      text = JSON.stringify(
+        { export_path: exportPath, ...parsed },
+        null,
+        2
+      );
+    }
     return {
       isError: result.isError,
-      content: [{ type: "text" as const, text: response }],
+      content: [{ type: "text" as const, text: truncateResult(text) }],
     };
   }
 );
@@ -484,9 +639,12 @@ server.tool(
     ];
 
     const result = await runSiteone(args, 120_000);
+    const text = result.isError
+      ? result.output
+      : summarizeSiteoneOutput(result.output);
     return {
       isError: result.isError,
-      content: [{ type: "text" as const, text: truncateResult(result.output) }],
+      content: [{ type: "text" as const, text: truncateResult(text) }],
     };
   }
 );
